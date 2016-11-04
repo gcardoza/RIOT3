@@ -23,7 +23,7 @@
   char Irrigation_Status[150];       // Buffer to hold formatted sensor data payload
 
   // ***** MQTT pub/sub service info *****
-  const char* Irrigation_Status_Topic = "/RioT3/Status";
+  const char* RioT_Status_Topic = "/RioT/Status";
   const char* Control_Topic = "/Control/RioT";
   WiFiClient espClient;
   PubSubClient client(espClient);
@@ -35,14 +35,14 @@
   unsigned long Last_Publish_Time = 0;
   
   // Irrigation Control Variables. Each array is indexed by the Zone number starting at 1 (0 is ignored)
-  #define Max_Zones 8
+  #define Max_Zones     8
   #define Zone_Bit0_Pin 2
   #define Zone_Bit1_Pin 4
   #define Zone_Bit2_Pin 5
   #define Zone_Bit3_Pin 12
 
-  int Active_Zone          = 0;
-  int Zone_On_Duration[]    = {0, 1800, 1800, 1800, 3600, 3600, 3600,    0,    0};
+  int Active_Zone         = 0;
+  int Zone_On_Duration[]  = {0, 0, 0, 0, 0, 0, 0, 0, 0};
 
   // Irrigation Zone ON array. Indexed by Zone number starting at 1 (Zone 0 turns all to OFF)
   int Zone_Bit0_Control[] = {1,0,1,0,1,0,1,0,1};
@@ -94,10 +94,9 @@ void loop()
   // ***** Check for and Process Subscribed Messages *****
   client.loop();
   
-  Current_Time = millis()/1000;    // get current program run-time in seconds
-  // Serial.print("Current Time: ");
-  // Serial.println(Current_Time);
-  
+  // Capture the current cpu Run-time in seconds
+  Current_Time = millis()/1000;
+ 
   // ***** Manage Zone Schedule
   Process_Zone_Schedule();
   
@@ -170,7 +169,7 @@ void reconnect()
   }
 }
 
-// ***** Process Subscribed message received from BIOT *****
+// ***** Process Subscribed message received from BioT *****
 void callback(char* topic, byte* payload, unsigned int length)
 {  
   char data_b[100], Control_Message[150];
@@ -190,26 +189,25 @@ void callback(char* topic, byte* payload, unsigned int length)
   // Ensure the message is long enough to contain a valid command
   if(length <3) 
   {
-    Serial.print("-> Control Message too short. Ignoring Command");
+    Serial.println("-> Control Message too short. Ignoring Command");
     return;
   }
   
   // Convert Payload to a character array
   for (int i = 0; i < length; i++) Control_Message[i] = (char)payload[i];
-  Control_Message[length] = '\0'; // Ensure there is a string terminator
+  Control_Message[length] = '\0'; // Ensure there is a string terminator at the end
   Serial.print("-> Message: <");
   Serial.print(Control_Message);
   Serial.println(">");
 
   // ***** Process Inbound Command *****
-
   // Isolate the Control Command (first 3 characters)
   Serial.print("-> Processing Inbound Control Command: ");
   strncpy(Control_Command, Control_Message, 3);
   Control_Command[3] = '\0';
   Serial.println(Control_Command);
 
-  // ** 1. Change Status Update Interval **
+  // ** Change Status Update Interval **
   if(!strcmp(Control_Command, "UF:"))
   {
     //Ensure Control_Message length is correct for this message
@@ -230,25 +228,26 @@ void callback(char* topic, byte* payload, unsigned int length)
       Serial.print ("      -> Value < 5 seconds. Forcing Interval to 5 seconds\n");
       Control_Data = 5;
     }
-    Update_Interval = Control_Data;    // Set Sensor Data Update Interval
+    Update_Interval = Control_Data;    // Set Status Update Interval
+    Last_Publish_Time = millis()/1000 - Update_Interval; // Force sending a status
     return;
   }
 
-  // ** 2. Force Node to Publish Sensor Data NOW **
+  // ** Force Node to Publish a Status NOW **
   if(!strcmp(Control_Command, "UN:"))
   {
-    Serial.print("   -> Forcing Node to Publish Status Now");
+    Serial.println("   -> Forcing Node to Publish Status Now");
     Last_Publish_Time = millis()/1000 - Update_Interval;
     return;
   }
   
-  // ** 3. Force Node to Reset the Update Sequence number to 0 **
+  // ** Force Node to Reset the Update Sequence number to 0 **
   if(!strcmp(Control_Command, "RS:"))
   {
     Serial.println("   -> Forcing Node to Reset Sequence Number to 0");
     Update_Sequence = 0;
-    Serial.println("   -> Forcing Node to Publish Sensor Data NOW");
-    Last_Publish_Time = millis()/1000 - Update_Interval;
+    Serial.println("   -> Forcing Node to Publish Status Now");
+    Last_Publish_Time = millis()/1000 - Update_Interval;  // Force sending a status
     return;
   }
 
@@ -261,7 +260,7 @@ void callback(char* topic, byte* payload, unsigned int length)
     return;
   }
 
-  // ** 5. Set OnTime for all Zones and start Irrigation Schedules **
+  // ** Set OnTime for all Zones and start Irrigation Schedules **
   if(!strcmp(Control_Command, "SA:"))
   {
     //Ensure Control_Message length is correct for this message
@@ -292,6 +291,46 @@ void callback(char* topic, byte* payload, unsigned int length)
     return;
   }
 
+  // ** Set OnTime for 1 Zone and turn it on **
+  if(!strcmp(Control_Command, "S1:"))
+  {
+    //Ensure Control_Message length is correct for this message
+    if(length < 12) 
+    {
+      Serial.println("   -> S1: Message is too short. Ignoring command.");
+      return;
+    }
+
+    //Get Zone # from message
+    strncpy(data_b, &Control_Message[5] ,1); 
+    data_b[1] = '\0';
+    x = atoi(data_b);
+        
+    //Get OnTime from message
+    strncpy(data_b, &Control_Message[7] ,5); 
+    data_b[5] = '\0';
+    Control_Data = atoi(data_b);
+
+    if(Control_Data == 0)
+    {
+      Serial.println("   -> Duration = 0. All Zones are being turned off");
+      Turn_Zone_On(0);
+      return;
+    }
+    
+    Serial.print("   -> Starting zone: ");
+    Serial.print(x);
+    Serial.print(" for ");
+    Serial.print(Control_Data);
+    Serial.println(" seconds");
+    
+    // Set Zone On Duration for all zones
+    Zone_On_Duration[x] = Control_Data;
+    
+    Turn_Zone_On(x);  //Start schedule with the first Zone
+    return;
+  }
+
   // ** 6. Set Irrigation Control Schedule **
   if(!strcmp(Control_Command, "IC:"))
   {
@@ -302,9 +341,8 @@ void callback(char* topic, byte* payload, unsigned int length)
       return;
     }
 
-    Serial.print("   -> Setting Irrigation Control Schedule");
-
-    // Update Zone Schedule from COntrol Message
+    // Update Zone Schedule from Control Message
+    Serial.println("   -> Updating Irrigation Control Schedule");
     y = 7;    // set index for Zone 1 On-Time
     for(x=1; x <= Max_Zones; x++)
     {
@@ -320,7 +358,6 @@ void callback(char* topic, byte* payload, unsigned int length)
     }
     // Start the Schedule
     Turn_Zone_On(1);  //Start schedule with the first Zone
-
     return;
   }
 }
@@ -331,8 +368,8 @@ void Publish_Irrigation_Status()
   // ***** Define variables *****
   char SE_b[10], ZN_b[10];
 
-  // Check if it is time to Send a Status message to the BioT
-  if(Current_Time < Last_Publish_Time + Update_Interval) return; // Not Yet
+  // Check if it is time to Send a Status message to the BioT. If not then return.
+  if(Current_Time < Last_Publish_Time + Update_Interval) return;
   
   Serial.println("\n***** PREPARING TO PUBLISH IRRIGATION STATUS *****");
   Last_Publish_Time = Current_Time;   // Reset last publish time
@@ -346,7 +383,7 @@ void Publish_Irrigation_Status()
   strncat(Irrigation_Status, Code_Version, 5);
   strcat(Irrigation_Status, ",SE:");
   strncat(Irrigation_Status, SE_b, 6);
-  strcat(Irrigation_Status, ",ST:");
+  strcat(Irrigation_Status, ",IS:");
   sprintf(ZN_b, ",Z%1i:%5i\0", Active_Zone, Zone_On_Duration[Active_Zone]);
   strcat(Irrigation_Status, ZN_b);
 
@@ -357,11 +394,10 @@ void Publish_Irrigation_Status()
   
   // Publish Sensor Data to MQTT message queue
   Serial.print("-> Sending Status to MQTT Topic:");
-  Serial.println(Irrigation_Status_Topic);
+  Serial.println(RioT_Status_Topic);
   Serial.println(Irrigation_Status);
-  
-  client.publish(Irrigation_Status_Topic, Irrigation_Status);
-  
+  client.publish(RioT_Status_Topic, Irrigation_Status);
+    
   // Update Record Sequence
   Update_Sequence++;
   if(Update_Sequence > 999999)
@@ -405,7 +441,7 @@ void Turn_Zone_On(int zone)
   digitalWrite(Zone_Bit3_Pin, Zone_Bit3_Control[zone]);
 
   // Send a status message to BioT
-  Serial.print("   -> Forcing Node to Publish Status Now");
+  Serial.println("   -> Forcing Node to Publish Status Now");
   Last_Publish_Time = millis()/1000 - Update_Interval;
 }
 
@@ -414,16 +450,17 @@ void Process_Zone_Schedule()
 {
   int x, prev_zone;
   // ** Check if a schedule is active
-  if(Active_Zone == 0) return;  //Return if no zone is on
+  if(Active_Zone == 0) return;  // Return if no zone is on
 
-  // ** Check if current zone on-time has expired
-  if(Current_Time < Zone_Start_Time + Zone_On_Duration[Active_Zone]) return; //It hasn't
+  // ** Check if current zone on-time has expired.  If ignore and return.
+  if(Current_Time < Zone_Start_Time + Zone_On_Duration[Active_Zone]) return;
   
   // Current Zone has expired, turn it off and find next scheduled zone
-  Zone_On_Duration[Active_Zone] = 0;  // Clear Current Zones' Schedule
+  Zone_On_Duration[Active_Zone] = 0;  // Clear Current Zone's Schedule
   prev_zone = Active_Zone;            // Store Active Zone to help find next one
-  Turn_Zone_On(0);
+  Turn_Zone_On(0);                    // Stop all zones
 
+  // Find next Zone to start
   for(x += prev_zone; x <= Max_Zones; x++)
   {
     if(Zone_On_Duration[x] != 0)
