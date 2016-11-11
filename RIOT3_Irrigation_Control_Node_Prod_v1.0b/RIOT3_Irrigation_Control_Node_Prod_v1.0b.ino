@@ -8,10 +8,10 @@
 //      - WiFi & MQTT messaging interface
 //    Sainsmart 8 relay module
 
-  const char* Code_Version = " 1.0a";
+  const char* Code_Version = " 1.0b";
 
 // ***** Include header files *****
-  #include "RioT_Test.h"            // RioT & BioT Security Data
+  #include "RioT_Prod.h"            // RioT & BioT Security Data
   #include <PubSubClient.h>         // Library for MQTT Pub/Sub functions
   #include <ESP8266WiFi.h>          // Library for ESP8266 WiFi microcontroller
   
@@ -275,11 +275,12 @@ void callback(char* topic, byte* payload, unsigned int length)
 
     if(Control_Data == 0)
     {
-      Serial.println("   -> Duration = 0. All Zones are being turned off");
-      Turn_Zone_On(0);
+      Serial.println("   -> Duration = 0. Ignoring command.");
       return;
     }
-    
+
+    if(Active_Zone !=0) Turn_Zone_On(0);  // Stop current schedule if one is active
+        
     Serial.print("   -> Starting all Zones Sequentially for ");
     Serial.print(Control_Data);
     Serial.println(" seconds");
@@ -310,14 +311,15 @@ void callback(char* topic, byte* payload, unsigned int length)
     strncpy(data_b, &Control_Message[7] ,5); 
     data_b[5] = '\0';
     Control_Data = atoi(data_b);
-
+    
     if(Control_Data == 0)
     {
-      Serial.println("   -> Duration = 0. All Zones are being turned off");
-      Turn_Zone_On(0);
+      Serial.println("   -> Duration = 0. Ignoring command.");
       return;
     }
-    
+
+    if(Active_Zone !=0) Turn_Zone_On(0);  // Stop current schedule if one is active
+        
     Serial.print("   -> Starting zone: ");
     Serial.print(x);
     Serial.print(" for ");
@@ -326,7 +328,6 @@ void callback(char* topic, byte* payload, unsigned int length)
     
     // Set Zone On Duration for all zones
     Zone_On_Duration[x] = Control_Data;
-    
     Turn_Zone_On(x);  //Start schedule with the first Zone
     return;
   }
@@ -357,9 +358,21 @@ void callback(char* topic, byte* payload, unsigned int length)
       y += 9;
     }
     // Start the Schedule
-    Turn_Zone_On(1);  //Start schedule with the first Zone
+    if(Active_Zone !=0) Turn_Zone_On(0);  // Stop current schedule if one is active
+
+    // Find first scheduled Zone to start
+    for(x = 1; x <= Max_Zones; x++)
+    {
+      if(Zone_On_Duration[x] != 0)
+      {
+        Turn_Zone_On(x);      // Start first scheduled zone
+        return;
+      }
+    }
     return;
   }
+  // Command was not found.
+  Serial.println("   -> Unknown Control Command. Ignoring it.");
 }
 
 // ***** Format RIOT3 Irrigation Status message for BIOT2 Base Station *****
@@ -413,16 +426,21 @@ void Initialize_GPIO_Ports()
   pinMode(Zone_Bit3_Pin, OUTPUT);
 
   // Turn all Zones Off - Done by turning zone 0 On
-  Turn_Zone_On(0);
+  digitalWrite(Zone_Bit0_Pin, Zone_Bit0_Control[0]);
+  digitalWrite(Zone_Bit1_Pin, Zone_Bit1_Control[0]);
+  digitalWrite(Zone_Bit2_Pin, Zone_Bit2_Control[0]);
+  digitalWrite(Zone_Bit3_Pin, Zone_Bit3_Control[0]);
 }
 
 // ***** Turn the specifid Zone, 0 = All Zones off *****
 void Turn_Zone_On(int zone)
 {
+  if(Active_Zone == zone) return;  // Ignore request if there is no change
+  
   if(Active_Zone != 0)
   {
-    // Reset current Zone On-Time and send status to BioT that it is OFF
-    Serial.print("   -> Clearing On_Duration for Zone: ");
+    // Reset current Active Zone On-Time and send status to BioT that it is OFF
+    Serial.print("\n-> Clearing On_Duration for Zone: ");
     Serial.println(Active_Zone);
     Zone_On_Duration[Active_Zone] = 0;  // Clear Current Zone's Schedule
     Publish_Irrigation_Status();        // Send Status to BioT that Zone is Off
@@ -461,17 +479,20 @@ void Process_Zone_Schedule()
   // ** Check if current zone on-time has expired.  If ignore and return.
   if(Current_Time < Zone_Start_Time + Zone_On_Duration[Active_Zone]) return;
   
-  // Current Zone has expired, turn it off and find next scheduled zone
+  // Current Zone schedule has expired, turn it off and find next scheduled zone
   prev_zone = Active_Zone;            // Store Active Zone to help find next one
-  Turn_Zone_On(0);                    // Stop all zones and set active Zone to 0
-
+  Zone_On_Duration[Active_Zone] = 0;  // Turn off schedule for active zone
+  
   // Find next Zone to start
   for(x += prev_zone; x <= Max_Zones; x++)
   {
     if(Zone_On_Duration[x] != 0)
     {
+      Serial.print("\n-> Turning on Zone:");
+      Serial.println(x);
       Turn_Zone_On(x);      // Start active zone
       return;
     }
   }
+  Turn_Zone_On(0);                    // Turn off current zone if no remaing zones left
 }
